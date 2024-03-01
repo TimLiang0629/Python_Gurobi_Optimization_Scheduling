@@ -1,2 +1,2 @@
 # Python_Gurobi_Optimization_Scheduling
-Python Gurobi Pediatrician Scheduling Optimization at BCWH
+Python Gurobi Scheduling Optimization
