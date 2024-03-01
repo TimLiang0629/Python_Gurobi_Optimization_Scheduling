@@ -1,0 +1,141 @@
+import pandas as pd
+import gurobipy as gp
+from gurobipy import GRB
+
+m = gp.Model("Scheduling")
+
+directory_path = r'C:\Users\tanki\Desktop\MMA2024\TERM 2 January\Prescrptive analysis\Pediatrician Scheduling at BCWH'
+
+pediatrician_data_file_path = directory_path + r'\PediatricianData.xlsx'
+
+### Create indices for shifts, pediatricians, and weeks
+ShiftNum = list(range(1,43))
+PedNum = list(range(1,14))
+WeekNum = list(range(1,4))
+
+ 
+
+#Number of Shifts Required to Work for each Pediatrician
+ShiftReqData = pd.read_excel(pediatrician_data_file_path, sheet_name='ShiftsRequired', index_col=0)
+
+ 
+
+#Shift availability  by each pediatrician (1 indicates pediatrician is available, 0 indicates not available)
+AvailabilityData = pd.read_excel(pediatrician_data_file_path, sheet_name='ShiftRequests', skiprows=2, nrows=43, usecols="D:Q", index_col=0)
+
+
+#Number of remaining times that pediatrician is supposed to serve as the Pediatrician of the Week
+POWReqData = pd.read_excel(pediatrician_data_file_path, sheet_name='RemainingPOWrequirements', index_col=0)
+
+#x_ij, e.g., x(1,1), x(1,2), ..., x(1,13), x(2,1), x(2,2), ..., x(2,13), ..., x(42,13)
+pedVar = m.addVars(ShiftNum,PedNum, vtype=GRB.BINARY, name="X")
+
+ 
+
+#y_kj, e.g., y(1,1), y(1,2), ..., y(1,13), y(2,1), y(2,2),..., y(2,13),..., y(3,13)
+powVar = m.addVars(WeekNum,PedNum, vtype=GRB.BINARY, name="Y")
+
+ 
+
+#z_kj, e.g., z(1,1), z(1,2), ..., z(1,13), z(2,1), z(2,2),..., z(2,13),..., z(3,13)
+weekendVar = m.addVars(WeekNum, PedNum, vtype=GRB.BINARY, name="Z")
+
+
+ 
+
+### Hard Constraint: every shift must have exactly one pediatrician
+onePedCstr = m.addConstrs((gp.quicksum(pedVar[i,j] for j in PedNum) == 1 for i in ShiftNum), name = 'onePed')
+
+ 
+
+### Hard Constraint: every pediatrician must work their expected number of shifts for the cycle
+expectedShiftsCstr = m.addConstrs((gp.quicksum(pedVar[i,j] for i in ShiftNum) == ShiftReqData['ShiftsRequired'][j]
+                                 for j in PedNum), name = 'expectedShifts')
+
+ 
+
+### Hard Constraint: avoid scheduling pediatrician on shift they requested off
+availabilityCstr = m.addConstrs((pedVar[i,j] <= AvailabilityData.loc[i,j]
+                                 for i in ShiftNum for j in PedNum), name="availability")
+
+### Hard Constraint: pediatricians cannot work back-to-back shifts
+backToBackCstr = m.addConstrs((pedVar[i,j] + pedVar[i+1,j] <= 1 for i in ShiftNum[:-1] for j in PedNum), name = "backToBack")
+
+ 
+
+### Hard Constraint: pediatricians cannot work consecutive night shifts
+consecNightCstr = m.addConstrs((pedVar[i,j] + pedVar[i+2,j] <= 1 for i in ShiftNum if i % 2 == 0 and i <= 40 for j in PedNum), 
+                               name = "consecNight")
+
+ 
+
+### Hard Constraint: pediatricians can work at most two shifts in a given weekend
+weekendShiftsCstr = m.addConstrs((pedVar[10+14*(k-1),j] + pedVar[11+14*(k-1),j] + pedVar[12+14*(k-1),j] 
+                                  + pedVar[13+14*(k-1),j] + pedVar[14+14*(k-1),j] <= 2 
+                                  for k in WeekNum for j in PedNum), name = "weekendShifts")
+
+ 
+
+### Hard Constraint: One pediatrician serves as POW each week
+POWCstr = m.addConstrs((gp.quicksum(powVar[k,j] for j in PedNum) == 1 for k in WeekNum), name = "POW")
+
+ 
+
+### Hard Constraint: POW must work Tuesday day, Thursday day, and Saturday night in week that they are POW
+POWTueCstr = m.addConstrs((pedVar[3+14*(k-1),j] >= powVar[k,j] for k in WeekNum for j in PedNum), name = "POWTue")
+POWSatNightCstr = m.addConstrs((pedVar[12 + 14*(k-1), j] >= powVar[k, j] for k in WeekNum for j in PedNum), name="POWSatNight")
+
+ 
+
+### Hard Constraint: No pediatrician can serve as POW more than once in the cycle
+POWLimitCstr = m.addConstrs((sum(powVar[k, j] for k in WeekNum) <= 1 for j in PedNum), name = "POWLimit")
+
+ 
+
+### Hard Constraint: Don't schedule pediatrician as POW if they already fulfilled year's requirement
+POWReqCstr = m.addConstrs((gp.quicksum(powVar[k,j] for k in WeekNum) <= POWReqData.loc[j, 'POWReqs'] for j in PedNum), 
+                          name = "POWReq")
+
+### Hard Constraint: Don't schedule pediatricians to work on consecutive weekends
+consecWeekendCstr = m.addConstrs((pedVar[10+14*(k-1),j] + pedVar[11+14*(k-1),j] + pedVar[12+14*(k-1),j] 
+                                  + pedVar[13+14*(k-1),j] + pedVar[14+14*(k-1),j] <= 5*weekendVar[k,j] 
+                                  for k in WeekNum for j in PedNum), name = "consecWeekend")
+
+ 
+
+### Add deviational variables o^{cw}_{kj}, e.g., o^cw_(2,1), o^cw_(2,2), ..., o^cw_(2,13), o^cw_(3,1), ..., o^cw_(3,13)
+cwDevVar = m.addVars(WeekNum[1:],PedNum, vtype=GRB.CONTINUOUS, name="CW")
+
+ 
+
+### Soft Constraint: Pediatricians prefer not to work on consecutive weekends
+consecWeekendPref = m.addConstrs((weekendVar[k-1, j] + weekendVar[k, j] - cwDevVar[k, j] <= 1 
+                                  for k in WeekNum[1:]  
+                                  for j in PedNum), 
+                                  name="consecWeekendPref")
+
+### Objective Function: Minimize the sum of all consecutive weekend deviational variables
+m.setObjective(gp.quicksum(cwDevVar[k,j] for k in WeekNum[1:] for j in PedNum), GRB.MINIMIZE)
+
+# Optimize the model
+m.optimize()
+
+if m.status == GRB.OPTIMAL:
+    print("Optimal solution found.\n")
+    
+    # Display assignments of pediatricians to shifts
+    print("Pediatrician Shift Assignments:")
+    for i in ShiftNum:
+        for j in PedNum:
+            if pedVar[i,j].X > 0.5: 
+                print(f"Shift {i} assigned to Pediatrician {j}")
+    
+    print("\nPediatrician of the Week Assignments:")
+    for k in WeekNum:
+        for j in PedNum:
+            if powVar[k,j].X > 0.5:
+                print(f"Week {k}: Pediatrician {j} is the POW")
+                
+    
+else:
+    print("No optimal solution found. Status Code:", m.status)
